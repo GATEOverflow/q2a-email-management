@@ -1,9 +1,9 @@
 {
-	"name": "Email Optout",
-	"description": "Adds a user option to opt out of all site-generated email notifications in Q2A",
+	"name": "Email Management",
+	"description": "Admin and User can controll the Email Notifications",
 	"uri": "",
-	"version": "1.O",
-	"date": "2025-06-25",
+	"version": "3.O",
+	"date": "2025-12-21",
 	"author": "Shaik Masthan",
 	"author_uri": "https://github.com/csemasthan/",
 	"license": "GPLv2",
