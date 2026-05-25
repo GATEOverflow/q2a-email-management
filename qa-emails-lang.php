@@ -23,4 +23,11 @@ return array(
 	'subject_type' => 'The subject key is',
 	'subject_type_language_key' => 'Language key',
 	'subject_type_direct_key' => 'Exact Subject',
+
+	// Unsubscribe page
+	'unsub_invalid_link'  => 'This unsubscribe link is invalid or has expired.',
+	'unsub_page_intro'    => 'Use the checkboxes below to choose which email notifications you receive. Uncheck any type to stop receiving it.',
+	'unsub_all_link'      => 'Unsubscribe from all emails',
+	'unsub_all_confirm'   => 'Are you sure you want to unsubscribe from all emails?',
+	'unsub_all_done'      => 'You have been unsubscribed from all email notifications.',
 );

@@ -51,7 +51,7 @@ function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, 
        Forced & active → always send
     --------------------------------- */
     if (in_array($subject, $forced_subjects, true)) {
-        return qa_send_notification_base(
+        return em_send_with_footer(
             $userid, $email, $handle, $subject, $body, $subs, $html
         );
     }
@@ -64,7 +64,7 @@ function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, 
 
     // New user → allow (except forced already handled above)
     if ($prefs_csv === null) {
-        return qa_send_notification_base(
+        return em_send_with_footer(
             $userid, $email, $handle, $subject, $body, $subs, $html
         );
     }
@@ -82,7 +82,7 @@ function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, 
     --------------------------------- */
     if (!isset($managed_events[$subject])) {
         if (in_array('0', $prefs, true)) {
-            return qa_send_notification_base(
+            return em_send_with_footer(
                 $userid, $email, $handle, $subject, $body, $subs, $html
             );
         }
@@ -97,7 +97,7 @@ function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, 
     $eventid = (string)$managed_events[$subject];
 
     if (in_array($eventid, $prefs, true)) {
-        return qa_send_notification_base(
+        return em_send_with_footer(
             $userid, $email, $handle, $subject, $body, $subs, $html
         );
     }
@@ -106,4 +106,41 @@ function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, 
        Otherwise: skip
     --------------------------------- */
     return true;
+}
+
+/**
+ * Retrieve (or lazily create) the per-user unsubscribe token.
+ */
+function em_get_unsubscribe_token($userid)
+{
+    require_once QA_INCLUDE_DIR . 'db/metas.php';
+    $token = qa_db_usermeta_get($userid, 'emailtoken');
+    if (!$token) {
+        $token = bin2hex(random_bytes(16));
+        qa_db_usermeta_set($userid, 'emailtoken', $token);
+    }
+    return $token;
+}
+
+/**
+ * Append an unsubscribe footer to the email body, then send.
+ */
+function em_send_with_footer($userid, $email, $handle, $subject, $body, $subs, $html)
+{
+    if ($userid) {
+        $token = em_get_unsubscribe_token($userid);
+        $url   = qa_path_absolute('email-preferences', ['uid' => $userid, 'token' => $token]);
+
+        if ($html) {
+            $body .= '<p style="font-size:12px;color:#888;text-align:center;margin-top:20px;'
+                   . 'border-top:1px solid #eee;padding-top:10px;">'
+                   . 'To manage your email preferences, '
+                   . '<a href="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . '">click here</a>.'
+                   . '</p>';
+        } else {
+            $body .= "\r\n\r\n--\r\nTo manage your email preferences, visit:\r\n" . $url;
+        }
+    }
+
+    return qa_send_notification_base($userid, $email, $handle, $subject, $body, $subs, $html);
 }
