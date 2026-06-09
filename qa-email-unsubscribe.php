@@ -1,10 +1,12 @@
 <?php
 /**
  * Standalone email-preferences page.
- * Accessible without login — authenticated by a per-user HMAC token.
- * URL: {site}/email-preferences?uid=NNN&token=HEX
+ * Accessible without login — authenticated by an encrypted code parameter.
+ * URL: {site}/email-preferences?code=ENCRYPTED_BASE64
  */
 if (!defined('QA_VERSION')) { header('Location: ../../'); exit; }
+
+require_once QA_EMAIL_MGMT_DIR . 'qa-email-helpers.php';
 
 class qa_email_unsubscribe_page
 {
@@ -17,20 +19,30 @@ class qa_email_unsubscribe_page
     {
         require_once QA_INCLUDE_DIR . 'db/metas.php';
 
-        $uid   = (int)qa_get('uid');
-        $token = trim((string)qa_get('token'));
+        $code = trim((string)qa_get('code'));
 
         $qa_content          = qa_content_prepare();
         $qa_content['title'] = qa_lang_html('emailopt/email_notifications_header');
 
         /* --------------------------------------------------
-           Validate token
+           Decrypt code → uid + token
         -------------------------------------------------- */
-        if (!$uid || $token === '') {
+        $decoded = null;
+        if ($code !== '') {
+            $decoded = em_decrypt_uid($code);
+        }
+
+        if ($decoded === null) {
             $qa_content['error'] = qa_lang_html('emailopt/unsub_invalid_link');
             return $qa_content;
         }
 
+        $uid   = $decoded['uid'];
+        $token = $decoded['token'];
+
+        /* --------------------------------------------------
+           Validate token against stored value
+        -------------------------------------------------- */
         $stored = qa_db_usermeta_get($uid, 'emailtoken');
 
         if (!$stored || !hash_equals($stored, $token)) {
@@ -52,8 +64,6 @@ class qa_email_unsubscribe_page
 
         /* --------------------------------------------------
            Load manageable events (active, not forced)
-           Min-level filtering is skipped on this page because
-           the user arrives via email (already a subscriber).
         -------------------------------------------------- */
         $events = qa_db_read_all_assoc(
             qa_db_query_sub(
@@ -63,7 +73,7 @@ class qa_email_unsubscribe_page
             )
         );
 
-        $manageable = [];
+        $manageable = array();
         foreach ($events as $ev) {
             if ((int)$ev['active'] === 1 && (int)$ev['forced'] === 0) {
                 $manageable[] = $ev;
@@ -86,7 +96,7 @@ class qa_email_unsubscribe_page
             $csv_current = qa_db_usermeta_get($uid, 'emailprefs');
         }
 
-        $saved_prefs = is_string($csv_current) ? explode(',', $csv_current) : [];
+        $saved_prefs = is_string($csv_current) ? explode(',', $csv_current) : array();
         $is_new_user = ($csv_current === null && !$saved_ok);
 
         /* --------------------------------------------------
@@ -123,11 +133,10 @@ class qa_email_unsubscribe_page
             . '</label></div>';
 
         // "Unsubscribe from all" convenience link
-        $unsub_all_url = qa_path_absolute('email-preferences', [
-            'uid'    => $uid,
-            'token'  => $token,
+        $unsub_all_url = qa_path_absolute('email-preferences', array(
+            'code'   => $code,
             'action' => 'unsubscribe_all',
-        ]);
+        ));
 
         $unsubscribe_link = '<p style="margin-top:14px;font-size:13px;">'
             . '<a href="' . qa_html($unsub_all_url) . '" '
@@ -140,26 +149,26 @@ class qa_email_unsubscribe_page
             . $rows
             . $unsubscribe_link;
 
-        // The form action embeds uid + token in the URL so they survive the POST round-trip.
+        // Form action preserves the code param across the POST round-trip
         $form_action = htmlspecialchars(
-            qa_path('email-preferences', ['uid' => $uid, 'token' => $token]),
+            qa_path('email-preferences', array('code' => $code)),
             ENT_QUOTES,
             'UTF-8'
         );
 
-        $qa_content['form'] = [
+        $qa_content['form'] = array(
             'tags'    => 'method="post" action="' . $form_action . '"',
             'style'   => 'wide',
-            'fields'  => [
-                ['type' => 'static', 'value' => $body_html],
-            ],
-            'buttons' => [
-                [
+            'fields'  => array(
+                array('type' => 'static', 'value' => $body_html),
+            ),
+            'buttons' => array(
+                array(
                     'label' => qa_lang_html('emailopt/save_email_preferences'),
                     'tags'  => 'name="save_emailprefs_unsub"',
-                ],
-            ],
-        ];
+                ),
+            ),
+        );
 
         return $qa_content;
     }

@@ -26,6 +26,7 @@ class qa_email_mgmt_admin
 				`active` TINYINT(1) DEFAULT 1,
 				`min_level` SMALLINT NOT NULL DEFAULT 0,
 				`subject_type` TINYINT(1) NOT NULL DEFAULT 1,
+				`custom_body` TEXT DEFAULT NULL,
 				`created` DATETIME DEFAULT CURRENT_TIMESTAMP,
 				PRIMARY KEY (`eventid`),
 				UNIQUE KEY (`subject_key`)
@@ -36,6 +37,14 @@ class qa_email_mgmt_admin
 				[$sql],
 				$this->default_insert_queries()
 			);
+		}
+
+		// Existing table: add custom_body column if missing (upgrade migration)
+		$cols = qa_db_read_all_values(
+			qa_db_query_sub("SHOW COLUMNS FROM `$tbl` LIKE 'custom_body'")
+		);
+		if (empty($cols)) {
+			return "ALTER TABLE `$tbl` ADD COLUMN `custom_body` TEXT DEFAULT NULL AFTER `subject_type`";
 		}
 
 		return null;
@@ -123,6 +132,12 @@ class qa_email_mgmt_admin
 			$active    = (int)qa_post_text('active_'.$i);
 			$min_level = (int)qa_post_text('min_level_'.$i);
 
+			// Custom body: trim, convert empty to null (= use Q2A default)
+			$custom_body_raw = qa_post_text('custom_body_'.$i);
+			$custom_body = ($custom_body_raw !== null && trim($custom_body_raw) !== '')
+				? trim($custom_body_raw)
+				: null;
+
 			if ($title === '' || $subject === '') {
 				continue;
 			}
@@ -140,12 +155,13 @@ class qa_email_mgmt_admin
 					(int)$old['subject_type'] !== $subject_type ||
 					(int)$old['forced'] !== $forced ||
 					(int)$old['active'] !== $active ||
-					(int)$old['min_level'] !== $min_level;
+					(int)$old['min_level'] !== $min_level ||
+					(isset($old['custom_body']) ? $old['custom_body'] : null) !== $custom_body;
 
 				if ($changed) {
 					qa_db_query_sub(
 						'UPDATE ^email_events
-						 SET user_title=$, subject_key=$, forced=#, active=#, min_level=#, subject_type=#
+						 SET user_title=$, subject_key=$, forced=#, active=#, min_level=#, subject_type=#, custom_body=$
 						 WHERE eventid=#',
 						$title,
 						$subject,
@@ -153,6 +169,7 @@ class qa_email_mgmt_admin
 						$active,
 						$min_level,
 						$subject_type,
+						$custom_body,
 						$eventid
 					);
 				}
@@ -164,14 +181,15 @@ class qa_email_mgmt_admin
 			else {
 				qa_db_query_sub(
 					'INSERT INTO ^email_events
-					 (user_title, subject_key, forced, active, min_level,subject_type)
-					 VALUES ($, $, #, #, #,#)',
+					 (user_title, subject_key, forced, active, min_level, subject_type, custom_body)
+					 VALUES ($, $, #, #, #, #, $)',
 					$title,
 					$subject,
 					$forced,
 					$active,
 					$min_level,
 					$subject_type,
+					$custom_body
 				);
 			}
 		}
@@ -192,6 +210,7 @@ class qa_email_mgmt_admin
 		
         if (qa_clicked('save_email_events')) {
             $saved = $this->save_events();
+            qa_set_option('em_footer_text', qa_post_text('em_footer_text'));
         }
 
         $events = $this->load_events();
@@ -283,6 +302,13 @@ class qa_email_mgmt_admin
 									<option value="0">'.qa_lang_html('emailopt/inactive').'</option>
 								</select>
 							</div>
+
+							<div class="ev-row">
+								<label class="ev-label">'.qa_lang_html('emailopt/custom_body_label').'</label>
+								<textarea class="ev-input" name="custom_body_${i}" rows="6"
+									placeholder="'.qa_lang_html('emailopt/custom_body_placeholder').'"></textarea>
+								<small style="color:#888;">'.qa_lang_html('emailopt/custom_body_help').'</small>
+							</div>
 						`;
 
 						cont.appendChild(d);
@@ -360,6 +386,13 @@ class qa_email_mgmt_admin
 						<option value="0"'.($act==0?' selected':'').'>'.qa_lang_html('emailopt/inactive').'</option>
 					</select>
 				</div>
+
+				<div class="ev-row">
+					<label class="ev-label">'.qa_lang_html('emailopt/custom_body_label').'</label>
+					<textarea class="ev-input" name="custom_body_'.$i.'" rows="6"
+						placeholder="'.qa_lang_html('emailopt/custom_body_placeholder').'">'.(isset($ev['custom_body']) ? qa_html($ev['custom_body']) : '').'</textarea>
+					<small style="color:#888;">'.qa_lang_html('emailopt/custom_body_help').'</small>
+				</div>
 			</div>';
 			
 			$i++;
@@ -377,6 +410,13 @@ class qa_email_mgmt_admin
 				'ok' => $saved ? qa_lang_html('emailopt/events_saved') : null,
 
 				'fields' => [
+					[
+						'label' => 'Email Footer Note',
+						'type'  => 'textarea',
+						'tags'  => 'name="em_footer_text" rows="4" style="width:100%;font-family:monospace;"',
+						'value' => qa_html(qa_opt('em_footer_text') ?: 'You are receiving this email because you are registered on our site.'),
+						'note'  => 'Displayed at the bottom of every email. HTML is supported.',
+					],
 					[ 'type' => 'static', 'value' => $html ],
 					[
 						'type'  => 'hidden',
