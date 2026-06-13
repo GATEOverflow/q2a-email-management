@@ -17,6 +17,44 @@ if (!defined('QA_EMAIL_FOOTER_TEXT')) define('QA_EMAIL_FOOTER_TEXT', qa_opt('em_
 // ──────────────────────────────────────────────────────────────
 
 /**
+ * Load and cache (per-request) the event configuration from the DB.
+ *
+ * Returns three maps keyed by the resolved subject string:
+ *   forced  – subjects that always send regardless of user preference
+ *   managed – subject → eventid
+ *   bodies  – subject → custom body template
+ *
+ * @return array{forced: string[], managed: array<string,int>, bodies: array<string,string>}
+ */
+function em_get_events_config(): array
+{
+    static $cache = null;
+    if ($cache !== null) {
+        return $cache;
+    }
+
+    $rows  = qa_db_read_all_assoc(qa_db_query_sub('SELECT * FROM ^email_events'));
+    $cache = ['forced' => [], 'managed' => [], 'bodies' => []];
+
+    foreach ($rows as $ev) {
+        if (empty($ev['subject_key'])) {
+            continue;
+        }
+        $subject = $ev['subject_type'] ? qa_lang($ev['subject_key']) : $ev['subject_key'];
+
+        if ((int)$ev['active'] === 1 && (int)$ev['forced'] === 1) {
+            $cache['forced'][] = $subject;
+        }
+        $cache['managed'][$subject] = (int)$ev['eventid'];
+        if (isset($ev['custom_body']) && trim($ev['custom_body']) !== '') {
+            $cache['bodies'][$subject] = $ev['custom_body'];
+        }
+    }
+
+    return $cache;
+}
+
+/**
  * Overriding core mail sender: skip if user opted out.
  */
 function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, $html = false)
@@ -32,43 +70,13 @@ function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, 
     */
 
     /* ---------------------------------
-       Load all events
+       Load all events (cached per-request)
     --------------------------------- */
-    $events = qa_db_read_all_assoc(
-        qa_db_query_sub(
-            'SELECT *
-             FROM ^email_events'
-        )
-    );
-
-    $forced_subjects = [];
-    $managed_events  = []; // subject => eventid
-    $event_bodies    = []; // subject => custom_body (only when set)
-
-    foreach ($events as $ev) {
-        if (empty($ev['subject_key'])) {
-            continue;
-        }
-		$original_subject = $ev['subject_key'];
-
-		if ($ev['subject_type']) {
-			// language key → translated it into exact subject
-			$original_subject = qa_lang($ev['subject_key']);
-		}
-		
-        // Active + forced → always send
-        if ((int)$ev['active'] === 1 && (int)$ev['forced'] === 1) {
-            $forced_subjects[] = $original_subject;
-        }
-
-        // Track managed events (active or not, forced or not)
-        $managed_events[$original_subject] = (int)$ev['eventid'];
-
-        // Track custom body templates
-        if (isset($ev['custom_body']) && trim($ev['custom_body']) !== '') {
-            $event_bodies[$original_subject] = $ev['custom_body'];
-        }
-    }
+    [
+        'forced'  => $forced_subjects,
+        'managed' => $managed_events,
+        'bodies'  => $event_bodies,
+    ] = em_get_events_config();
 
     // Override body with custom template if one exists for this subject
     if (isset($event_bodies[$subject])) {
@@ -152,11 +160,54 @@ function em_get_unsubscribe_token($userid)
 
 /**
  * Apply substitutions, build the HTML template, and send.
- * All ^placeholders are resolved here so qa_send_notification_base
- * receives clean content (empty subs → no double-substitution).
+ *
+ * Resolves missing email/handle from the DB, honours the global suspension
+ * flag, then calls qa_send_email() directly — bypassing qa_send_notification_base
+ * to avoid the plain-text "Dear [handle]," prefix it prepends before HTML bodies.
  */
 function em_send_with_footer($userid, $email, $handle, $subject, $body, $subs, $html)
 {
+    global $qa_notifications_suspended;
+    if ($qa_notifications_suspended > 0) {
+        return false;
+    }
+
+    // Resolve missing email / handle from DB (mirrors core qa_send_notification logic)
+    require_once QA_INCLUDE_DIR . 'util/string.php';
+    if (isset($userid)) {
+        $needEmail  = !qa_email_validate(@$email);
+        $needHandle = empty($handle);
+        if ($needEmail || $needHandle) {
+            if (QA_FINAL_EXTERNAL_USERS) {
+                if ($needHandle) {
+                    $handles = qa_get_public_from_userids([$userid]);
+                    $handle  = @$handles[$userid];
+                }
+                if ($needEmail) {
+                    $email = qa_get_user_email($userid);
+                }
+            } else {
+                require_once QA_INCLUDE_DIR . 'db/selects.php';
+                $account = qa_db_select_with_pending([
+                    'columns'   => ['email', 'handle'],
+                    'source'    => '^users WHERE userid = #',
+                    'arguments' => [$userid],
+                    'single'    => true,
+                ]);
+                if ($needHandle) {
+                    $handle = @$account['handle'];
+                }
+                if ($needEmail) {
+                    $email = @$account['email'];
+                }
+            }
+        }
+    }
+
+    if (!isset($email) || !qa_email_validate($email)) {
+        return false;
+    }
+
     // Merge passed subs with the standard Q2A substitutions
     $allSubs = array_merge([
         '^site_title' => qa_opt('site_title'),
@@ -194,8 +245,18 @@ function em_send_with_footer($userid, $email, $handle, $subject, $body, $subs, $
 
     $htmlBody = em_build_html_email($cleanSubject, $plainBody, $unsubUrl);
 
-    // Pass empty subs – already applied above; html=true tells Q2A to send as text/html
-    return qa_send_notification_base($userid, $email, $handle, $cleanSubject, $htmlBody, [], true);
+    // Dispatch directly — subs already applied, html=true sends as text/html.
+    // Bypassing qa_send_notification_base avoids the plain-text "Dear [handle],\n"
+    // prefix that the base injects before every HTML body when a handle is present.
+    return qa_send_email([
+        'fromemail' => qa_opt('from_email'),
+        'fromname'  => qa_opt('site_title'),
+        'toemail'   => $email,
+        'toname'    => $handle,
+        'subject'   => $cleanSubject,
+        'body'      => $htmlBody,
+        'html'      => true,
+    ]);
 }
 
 /**
@@ -302,6 +363,19 @@ function em_build_html_email($subject, $plainBody, $unsubUrl)
     <xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml>
   </noscript>
   <![endif]-->
+  <style>
+    @media only screen and (max-width:620px) {
+      .em-outer > tbody > tr > td { padding:24px 8px !important; }
+      .em-card   { border-radius:0 !important; }
+      .em-header { padding:20px !important; }
+      .em-body   { padding:24px 20px !important; }
+      .em-footer { padding:18px 20px !important; }
+    }
+    @media (prefers-color-scheme:dark) {
+      .em-body   { background-color:#1e1e2e !important; color:#d4d4d4 !important; }
+      .em-footer { background-color:#16161e !important; border-top-color:#3a3a4a !important; }
+    }
+  </style>
 </head>
 
 <body style="margin:0;padding:0;background-color:#f2f2f2;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%;">
@@ -313,13 +387,13 @@ function em_build_html_email($subject, $plainBody, $unsubUrl)
 
   <!-- Outer wrapper -->
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-         style="background-color:#f2f2f2;">
+         class="em-outer" style="background-color:#f2f2f2;">
     <tr>
       <td align="center" style="padding:40px 16px;">
 
         <!-- Email card (600 px max) -->
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
-               style="max-width:600px;width:100%;border-radius:8px;overflow:hidden;
+               class="em-card" style="max-width:600px;width:100%;border-radius:8px;overflow:hidden;
                       box-shadow:0 2px 8px rgba(0,0,0,0.08);">
 
 
@@ -327,7 +401,7 @@ function em_build_html_email($subject, $plainBody, $unsubUrl)
                ║        HEADER        ║
                ╚══════════════════════╝ -->
           <tr>
-            <td align="center"
+            <td align="center" class="em-header"
                 style="background-color:{$headerBg};padding:28px 32px 24px;">
 
               {$logoBlock}
@@ -350,7 +424,7 @@ function em_build_html_email($subject, $plainBody, $unsubUrl)
                ║         BODY         ║
                ╚══════════════════════╝ -->
           <tr>
-            <td style="background-color:#ffffff;padding:36px 40px;
+            <td class="em-body" style="background-color:#ffffff;padding:36px 40px;
                        font-family:Arial,Helvetica,sans-serif;
                        font-size:15px;
                        line-height:1.75;
@@ -364,7 +438,7 @@ function em_build_html_email($subject, $plainBody, $unsubUrl)
                ║        FOOTER        ║
                ╚══════════════════════╝ -->
           <tr>
-            <td align="center"
+            <td align="center" class="em-footer"
                 style="background-color:#f7f7f7;
                        border-top:1px solid #e0e0e0;
                        padding:24px 32px;

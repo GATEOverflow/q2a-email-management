@@ -31,8 +31,6 @@ return array(
 	'unsub_all_confirm'   => 'Are you sure you want to unsubscribe from all emails?',
 	'unsub_all_done'      => 'You have been unsubscribed from all email notifications.',
 
-	'emails/private_message_subject' => 'New private message from ^from_handle on ^site_title',
-
 	// Custom body templates
 	'custom_body_label'       => 'Custom email body template',
 	'custom_body_help'        => 'Leave empty to use the default Q2A email body. Available placeholders: ^site_title, ^site_url, ^to_handle, ^url, ^a_url, ^open, ^close &mdash; plus any event-specific ones (^q_title, ^a_content, ^c_content, ^c_handle, ^message, ^code, ^password, etc.)',
