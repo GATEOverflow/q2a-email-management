@@ -8,5 +8,6 @@
 	"author_uri": "https://github.com/csemasthan/",
 	"license": "GPLv2",
 	"min_q2a": "1.7.5",
-	"load_order": "after_db_init"
+	"load_order": "after_db_init",
+	"dependency_level": 2
 }
