@@ -9,12 +9,23 @@ require_once QA_EMAIL_MGMT_DIR . 'qa-email-helpers.php';
 
 if (!defined('QA_EMAIL_LOGO_URL'))    define('QA_EMAIL_LOGO_URL',    qa_opt('logo_url'));                                                   // leave empty to hide logo
 if (!defined('QA_EMAIL_LOGO_HEIGHT')) define('QA_EMAIL_LOGO_HEIGHT', 48);
-if (!defined('QA_EMAIL_HEADER_BG'))   define('QA_EMAIL_HEADER_BG',   '#1a1a2e');
+if (!defined('QA_EMAIL_HEADER_BG'))   define('QA_EMAIL_HEADER_BG',   '#155d7e');
 if (!defined('QA_EMAIL_HEADER_TEXT')) define('QA_EMAIL_HEADER_TEXT', '#ffffff');
 if (!defined('QA_EMAIL_ACCENT'))      define('QA_EMAIL_ACCENT',      '#4a90d9');
 if (!defined('QA_EMAIL_FOOTER_TEXT')) define('QA_EMAIL_FOOTER_TEXT', qa_opt('em_footer_text') ?: 'You are receiving this email because you are registered on our site.');
 
 // ──────────────────────────────────────────────────────────────
+//  ACCESS-LIST EMAIL TYPE BITS  ← must match the mask used on the
+//  email-preferences page (accesslist_emailprefs usermeta)
+// ──────────────────────────────────────────────────────────────
+ 
+if (!defined('EM_ACL_BIT_WELCOME'))            define('EM_ACL_BIT_WELCOME',            1);
+if (!defined('EM_ACL_BIT_EXAM_ADDED'))         define('EM_ACL_BIT_EXAM_ADDED',         2);
+if (!defined('EM_ACL_BIT_CUSTOM_MAIL'))        define('EM_ACL_BIT_CUSTOM_MAIL',        4);
+if (!defined('EM_ACL_BIT_BLOCKED'))            define('EM_ACL_BIT_BLOCKED',            8);
+if (!defined('EM_ACL_BIT_SUBSCRIBER_BLOCKED')) define('EM_ACL_BIT_SUBSCRIBER_BLOCKED', 16);
+ 
+// ────────────
 
 /**
  * Load and cache (per-request) the event configuration from the DB.
@@ -55,12 +66,98 @@ function em_get_events_config(): array
 }
 
 /**
- * Overriding core mail sender: skip if user opted out.
+ * Whether $userid wants to receive access-list emails of type $bit for
+ * access list $listid, based on their saved accesslist_emailprefs usermeta.
+ *
+ * $ownerid is supplied by the caller (the page already has it — it's the
+ * same row the member list itself came from) rather than looked up here,
+ * so this never runs an extra query per member. Pass null if the caller
+ * genuinely doesn't know it; that's treated as "not the owner" for safety.
+ *
+ * Mirrors the default-mask logic used on the email-preferences page: if the
+ * user has never saved a preference for this specific list, the list owner
+ * defaults to "everything on" (31) and a non-owner defaults to "everything
+ * except Subscriber-blocked" (15). A non-owner can never be granted bit 16
+ * even if a stale/tampered saved mask includes it.
  */
-function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, $html = false)
+function em_accesslist_pref_allows($userid, $listid, $bit, $ownerid = null)
+{
+    if($listid == 0){
+        return true;
+    }
+    require_once QA_INCLUDE_DIR . 'db/metas.php';
+ 
+    $listid   = (int)$listid;
+    $is_owner = ($ownerid !== null && (string)$userid === (string)$ownerid);
+ 
+    $prefs_csv = qa_db_usermeta_get($userid, 'accesslist_emailprefs');
+ 
+    $mask = null;
+    if (is_string($prefs_csv) && trim($prefs_csv) !== '') {
+        foreach (explode(',', $prefs_csv) as $item) {
+            $parts = explode(':', $item, 2);
+            if (count($parts) === 2 && (int)$parts[0] === (int)$listid) {
+                $mask = (int)$parts[1];
+                break;
+            }
+        }
+    }
+ 
+    if ($mask === null) {
+        // No saved preference for this list → default.
+        $mask = $is_owner ? 31 : 15;
+    } elseif (!$is_owner) {
+        $mask &= 15;
+    }
+ 
+    return ($mask & $bit) === $bit;
+}
+
+/**
+ * Overriding core mail sender: skip if user opted out.
+ *
+ * @param int|null $accesslist_id  When set together with $accesslist_bit,
+ *                                 this call is for an access-list email type
+ *                                 (Welcome / Addition of Exam / Custom Mails /
+ *                                 Blocked from Access List / Subscriber
+ *                                 blocked) rather than one of the normal
+ *                                 ^email_events subjects — the caller's
+ *                                 per-list preference bitmask is checked
+ *                                 instead of the main emailprefs list, and
+ *                                 the forced/managed event logic below is
+ *                                 skipped entirely.
+ * @param int|null $accesslist_bit One of the EM_ACL_BIT_* constants.
+ * @param int|null $accesslist_ownerid The access list's owner userid, as
+ *                                     already known by the caller — used to
+ *                                     apply the correct default mask and the
+ *                                     bit-16 (Subscriber blocked) owner-only
+ *                                     restriction, without an extra query.
+ * @return bool|null For the accesslist_id/accesslist_bit path: null if the
+ *                    recipient opted out (nothing was sent), true if it was
+ *                    sent, false if the send attempt itself failed. Check
+ *                    with === null, not a loose falsy check. For the normal
+ *                    event path (no accesslist params), always returns a
+ *                    bool, matching core's existing contract.
+ */
+function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, $html = false, $accesslist_id = null, $accesslist_bit = null, $accesslist_ownerid = null)
 {
     if (!$userid) {
         return qa_send_notification_base($userid, $email, $handle, $subject, $body, $subs, $html);
+    }
+ 
+    /* ---------------------------------
+       Access-list email → gated by that list's preference bitmask instead
+       of the normal managed/forced ^email_events flow below. This is the
+       one place that decides send-vs-skip for access-list mail — callers
+       should not re-check the preference themselves, just read the
+       return value.
+    --------------------------------- */
+    if ($accesslist_id !== null && $accesslist_bit !== null) {
+        if (!em_accesslist_pref_allows($userid, (int)$accesslist_id, (int)$accesslist_bit, $accesslist_ownerid)) {
+            //error_log("access list emails not selected");
+            return null; // opted out — distinct from true (sent) / false (send failed)
+        }
+        return em_send_with_footer($userid, $email, $handle, $subject, $body, $subs, $html);
     }
 
     /* Send email if:
@@ -122,7 +219,7 @@ function qa_send_notification($userid, $email, $handle, $subject, $body, $subs, 
                 $userid, $email, $handle, $subject, $body, $subs, $html
             );
         }
-		error_log("un managed not selected");
+		error_log("un managed emails not selected");
         return true;
     }
 
@@ -232,6 +329,16 @@ function em_send_with_footer($userid, $email, $handle, $subject, $body, $subs, $
         $allSubs['^a_url'] = '%%EM_ALT%%' . $allSubs['^a_url'] . '%%/EM_ALT%%';
     }
 
+    // ^raw_html carries pre-built, already-safe HTML (e.g. a data table) that
+    // must reach the template untouched — base64 survives htmlspecialchars(),
+    // linkify(), and nl2br() unchanged, and is decoded back to real markup as
+    // the very last step in em_build_html_email(). Do not put user-supplied
+    // text in here directly; escape any dynamic values before building it.
+    if (!empty($allSubs['^raw_html'])) {
+        $allSubs['^raw_html'] = '%%EM_RAWHTML%%' . base64_encode($allSubs['^raw_html']) . '%%/EM_RAWHTML%%';
+    }
+
+
     $plainBody    = strtr($body,    $allSubs);
     $cleanSubject = strtr($subject, $allSubs);
 
@@ -329,6 +436,20 @@ function em_build_html_email($subject, $plainBody, $unsubUrl)
 
     $bodyHtml = em_email_linkify($bodyHtml);
     $bodyHtml = nl2br($bodyHtml);
+
+
+    // ── 4. Raw pre-built HTML (e.g. a data table) for ^raw_html ──────
+    // Must run last: base64 has no '<', '>', or newlines, so it passed
+    // through htmlspecialchars(), linkify(), and nl2br() unchanged above.
+    $bodyHtml = preg_replace_callback(
+        '/%%EM_RAWHTML%%(.*?)%%\/EM_RAWHTML%%/s',
+        function($m) {
+            return base64_decode($m[1]);
+        },
+        $bodyHtml
+    );
+
+
 
     $siteTitleHtml = htmlspecialchars($siteTitle, ENT_QUOTES, 'UTF-8');
     $siteUrlHtml   = htmlspecialchars($siteUrl,   ENT_QUOTES, 'UTF-8');

@@ -58,3 +58,34 @@ function em_decrypt_uid($code)
     }
     return array('uid' => (int)$parts[0], 'token' => $parts[1]);
 }
+
+/**
+ * Check if a user wants to receive emails from a specific access list.
+ * Returns true if:
+ *   - User has no preference set (new user, defaults to opt-in)
+ *   - User's preference CSV includes this listid
+ *
+ * @param  int  $userid  The user's ID.
+ * @param  int  $listid  The access list ID.
+ * @return bool
+ 
+function em_user_wants_accesslist_email($userid, $listid)
+{
+    require_once QA_INCLUDE_DIR . 'db/metas.php';
+
+    $prefs_csv = qa_db_usermeta_get($userid, 'accesslist_emailprefs');
+
+    // No preference set → default opt-in (receive all)
+    if ($prefs_csv === null) {
+        return true;
+    }
+
+    // Explicitly empty → user opted out of all
+    if ($prefs_csv === '') {
+        return false;
+    }
+
+    $prefs = array_map('intval', explode(',', $prefs_csv));
+    return in_array((int)$listid, $prefs, true);
+}
+*/
