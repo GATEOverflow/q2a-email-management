@@ -302,7 +302,7 @@ class qa_email_unsubscribe_page
         );
 
         $user_list_ids = array_values(array_unique(array_merge($user_list_ids,array_map('intval', $owned_list_ids))));
-        
+
         // Remove inactive access lists
         if (function_exists('qa_exam_get_inactive_accesslist_ids')) {
             $user_list_ids = array_values(array_diff(
@@ -416,6 +416,10 @@ class qa_email_unsubscribe_page
 
                         if (!$is_owner && $bit === 16) {
                             // Subscriber blocked email is only relevant to the owner of the access list
+                            continue;
+                        }
+                        if($bit === 1 || $bit === 8){
+                            // Welcome email and Blocked from Access List are mandatory and cannot be disabled
                             continue;
                         }
                         $checked = ($mask & $bit) ? ' checked' : '';

@@ -518,6 +518,11 @@ private function email_prefs_generate()
                         continue;
                     }
 
+                    if ($bit === 1 || $bit === 8) {
+                        // Welcome email and Blocked from Access List are mandatory and cannot be disabled
+                        continue;
+                    }
+
 					$checked = ($mask & $bit) ? ' checked' : '';
 
 					$html .= '
