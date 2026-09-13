@@ -82,7 +82,7 @@ function em_get_events_config(): array
  */
 function em_accesslist_pref_allows($userid, $listid, $bit, $ownerid = null)
 {
-    if($listid == 0){
+    if($listid == 0 || $bit == EM_ACL_BIT_BLOCKED || $bit == EM_ACL_BIT_WELCOME){
         return true;
     }
     require_once QA_INCLUDE_DIR . 'db/metas.php';
