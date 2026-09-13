@@ -39,7 +39,7 @@ class qa_email_unsubscribe_page
 
         $uid   = $decoded['uid'];
         $token = $decoded['token'];
-        $qa_content['title'] = qa_lang_html('emailopt/email_notifications_header') . ' - User ' . qa_html($uid);
+        $qa_content['title'] = qa_lang_html('emailopt/email_notifications_header') . ' - ' . qa_html(qa_userid_to_handle($uid));
 
         /* --------------------------------------------------
            Validate token against stored value
@@ -119,51 +119,70 @@ class qa_email_unsubscribe_page
             // Save access list email preferences (only if section was rendered)
             if (qa_post_text('accesslist_emailprefs_present')) {
                 $al_prefs_raw = qa_post_text('accesslist_emailprefs');
+                error_log("Raw access list prefs: " . $al_prefs_raw);
                 $al_prefs = array();
+
+                // Get the user's current access-list IDs.
+                $user_accesslists_csv = qa_db_usermeta_get($uid, 'accesslists');
+
+                $user_list_ids = ($user_accesslists_csv && strlen(trim($user_accesslists_csv)) > 0)
+                    ? array_filter(array_map('intval', explode(',', $user_accesslists_csv)))
+                    : array();
+                
+                // Add access lists owned by me
+                $owned_list_ids = qa_db_read_all_values(
+                    qa_db_query_sub(
+                        "SELECT listid
+                            FROM ^accesslists
+                            WHERE userid = #",
+                        $uid
+                    )
+                );
+
+                $user_list_ids = array_values(array_unique(array_merge($user_list_ids,array_map('intval', $owned_list_ids))));
+                
+
+                // Remove inactive access lists.
+                if (function_exists('qa_exam_get_inactive_accesslist_ids')) {
+                    $user_list_ids = array_values(array_diff(
+                        $user_list_ids,
+                        qa_exam_get_inactive_accesslist_ids()
+                    ));
+                }
+
+                // Convert to a lookup array for fast validation.
+                $valid_user_lists = array_fill_keys($user_list_ids, true);
+
+                $total_lists = array();
+
+                if (!empty($user_list_ids)) {
+
+                    $ids_str = implode(',', $user_list_ids);
+
+                    //removing the lists that are not avialble in the access list table
+                    $existing_lists = qa_db_read_all_assoc(
+                        qa_db_query_sub(
+                            "SELECT listid, userid AS ownerid
+                            FROM ^accesslists
+                            WHERE listid IN ($ids_str)
+                            ORDER BY name ASC"
+                        )
+                    );
+
+                    $total_lists = array();
+                    
+                    foreach ($existing_lists as $row) {
+                        $total_lists[(int)$row['listid']] = (int)$row['ownerid'];
+                    }
+
+                }
 
                 // Expected format: 12:31,15:27,20:17
                 if ($al_prefs_raw !== '') {
-
-                    // Get the user's current access-list IDs.
-                    $user_accesslists_csv = qa_db_usermeta_get($uid, 'accesslists');
-
-                    $user_list_ids = ($user_accesslists_csv && strlen(trim($user_accesslists_csv)) > 0)
-                        ? array_filter(array_map('intval', explode(',', $user_accesslists_csv)))
-                        : array();
-
-                    // Remove inactive access lists.
-                    if (function_exists('qa_exam_get_inactive_accesslist_ids')) {
-                        $user_list_ids = array_values(array_diff(
-                            $user_list_ids,
-                            qa_exam_get_inactive_accesslist_ids()
-                        ));
-                    }
-
-                    // Convert to a lookup array for fast validation.
-                    $valid_user_lists = array_fill_keys($user_list_ids, true);
-
-                    // Get owners of all lists belonging to this user in one query.
-                    $owner_ids = array();
-
-                    if (!empty($user_list_ids)) {
-
-                        $ids_str = implode(',', $user_list_ids);
-
-                        $owner_rows = qa_db_read_all_assoc(
-                            qa_db_query_sub(
-                                "SELECT listid, userid AS ownerid
-                                FROM ^accesslists
-                                WHERE listid IN ($ids_str)"
-                            )
-                        );
-
-                        foreach ($owner_rows as $row) {
-                            $owner_ids[(int)$row['listid']] = (int)$row['ownerid'];
-                        }
-                    }
-
                     // Validate submitted preferences.
                     foreach (explode(',', $al_prefs_raw) as $item) {
+
+                    error_log("Processing access list pref item: " . $item);
 
                         $parts = explode(':', $item, 2);
 
@@ -184,24 +203,33 @@ class qa_email_unsubscribe_page
                             continue;
                         }
 
-                        // List does not belong to this user's current access lists.
-                        if (!isset($valid_user_lists[$lid])) {
+                        // List does not exist in the access list table.
+                        if (!isset($total_lists[$lid])) {
                             continue;
                         }
 
-                        // Access list record wasn't found.
-                        if (!isset($owner_ids[$lid])) {
+                        //List exist but neither belong to this user's current access lists nor owned.
+                        if ($uid != $total_lists[$lid] && !isset($valid_user_lists[$lid])) {
                             continue;
                         }
 
                         // Bit 16 (Subscriber blocked) is only available to the owner of the access list.
-                        if ($uid != $owner_ids[$lid]) {
+                        if ($uid != $total_lists[$lid]) {
                             $mask &= 15;
                         }
 
                         $al_prefs[$lid] = $mask;
                     }
+
                 }
+
+                // Every Valid listid kept to 15 for non-owners and 31 for owners if no preference was submitted for that list.
+                foreach($total_lists as $lid => $ownerid){
+                    if(!isset($al_prefs[$lid])){
+                        $al_prefs[$lid] = ($uid == $ownerid) ? 31 : 15;
+                    }
+                }
+
 
                 // Rebuild a clean string rather than trusting the submitted string directly.
                 $al_clean_parts = array();
@@ -211,6 +239,7 @@ class qa_email_unsubscribe_page
                 }
 
                 $al_clean_csv = implode(',', $al_clean_parts);
+                error_log("Cleaned access list prefs: " . $al_clean_csv);
 
                 qa_db_usermeta_set(
                     $uid,
@@ -297,7 +326,7 @@ class qa_email_unsubscribe_page
                 "SELECT listid
                     FROM ^accesslists
                     WHERE userid = #",
-                $userid
+                $uid
             )
         );
 

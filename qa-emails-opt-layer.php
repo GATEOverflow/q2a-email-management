@@ -35,48 +35,62 @@ private function email_prefs_generate()
             $al_prefs_raw = qa_post_text('accesslist_emailprefs');
             $al_prefs = array();
 
-            // Expected format: 12:31,15:27,20:17
+            // Get the user's current access-list IDs.
+            $user_accesslists_csv = qa_db_usermeta_get($userid, 'accesslists');
+
+            $user_list_ids = ($user_accesslists_csv && strlen(trim($user_accesslists_csv)) > 0)
+                ? array_filter(array_map('intval', explode(',', $user_accesslists_csv)))
+                : array();
+
+            // Add access lists owned by me.
+            // Owners may not be members of their own access lists.
+            $owned_list_ids = qa_db_read_all_values(
+                qa_db_query_sub(
+                    "SELECT listid
+                     FROM ^accesslists
+                     WHERE userid = #",
+                    $userid
+                )
+            );
+
+            $user_list_ids = array_values(array_unique(array_merge(
+                $user_list_ids,
+                array_map('intval', $owned_list_ids)
+            )));
+
+            // Remove inactive access lists.
+            if (function_exists('qa_exam_get_inactive_accesslist_ids')) {
+                $user_list_ids = array_values(array_diff(
+                    $user_list_ids,
+                    qa_exam_get_inactive_accesslist_ids()
+                ));
+            }
+
+            // Lookup of all valid current lists.
+            $total_lists = array();
+
+            if (!empty($user_list_ids)) {
+                $ids_str = implode(',', $user_list_ids);
+
+                $owner_rows = qa_db_read_all_assoc(
+                    qa_db_query_sub(
+                        "SELECT listid, userid AS ownerid
+                         FROM ^accesslists
+                         WHERE listid IN ($ids_str)"
+                    )
+                );
+
+                foreach ($owner_rows as $row) {
+                    $total_lists[(int)$row['listid']] = (int)$row['ownerid'];
+                }
+            }
+
+            // Convert to a lookup array for fast validation.
+            $valid_user_lists = array_fill_keys($user_list_ids, true);
+
+            // Parse and validate submitted preferences.
+            // Missing valid lists are filled with their defaults below.
             if ($al_prefs_raw !== '') {
-
-                // Get the user's current access-list IDs.
-                $user_accesslists_csv = qa_db_usermeta_get($userid, 'accesslists');
-
-                $user_list_ids = ($user_accesslists_csv && strlen(trim($user_accesslists_csv)) > 0)
-                    ? array_filter(array_map('intval', explode(',', $user_accesslists_csv)))
-                    : array();
-
-                // Remove inactive access lists.
-                if (function_exists('qa_exam_get_inactive_accesslist_ids')) {
-                    $user_list_ids = array_values(array_diff(
-                        $user_list_ids,
-                        qa_exam_get_inactive_accesslist_ids()
-                    ));
-                }
-
-                // Convert to a lookup array for fast validation.
-                $valid_user_lists = array_fill_keys($user_list_ids, true);
-
-                // Get owners of all lists belonging to this user in one query.
-                $owner_ids = array();
-
-                if (!empty($user_list_ids)) {
-
-                    $ids_str = implode(',', $user_list_ids);
-
-                    $owner_rows = qa_db_read_all_assoc(
-                        qa_db_query_sub(
-                            "SELECT listid, userid AS ownerid
-                            FROM ^accesslists
-                            WHERE listid IN ($ids_str)"
-                        )
-                    );
-
-                    foreach ($owner_rows as $row) {
-                        $owner_ids[(int)$row['listid']] = (int)$row['ownerid'];
-                    }
-                }
-
-                // Validate submitted preferences.
                 foreach (explode(',', $al_prefs_raw) as $item) {
 
                     $parts = explode(':', $item, 2);
@@ -98,22 +112,30 @@ private function email_prefs_generate()
                         continue;
                     }
 
-                    // List does not belong to this user's current access lists.
-                    if (!isset($valid_user_lists[$lid])) {
+                    // List does not exist in the access list table.
+                    if (!isset($total_lists[$lid])) {
                         continue;
                     }
 
-                    // Access list record wasn't found.
-                    if (!isset($owner_ids[$lid])) {
+                    //List exist but neither belong to this user's current access lists nor owned.
+                    if ($userid != $total_lists[$lid] && !isset($valid_user_lists[$lid])) {
                         continue;
                     }
 
                     // Bit 16 (Subscriber blocked) is only available to the owner of the access list.
-                    if ($userid != $owner_ids[$lid]) {
+                    if ($userid != $total_lists[$lid]) {
                         $mask &= 15;
                     }
 
                     $al_prefs[$lid] = $mask;
+                }
+            }
+
+            // Any valid current list missing from the POST gets its default:
+            // owner = 31, non-owner = 15.
+            foreach ($total_lists as $lid => $ownerid) {
+                if (!isset($al_prefs[$lid])) {
+                    $al_prefs[$lid] = ($userid == $ownerid) ? 31 : 15;
                 }
             }
 
